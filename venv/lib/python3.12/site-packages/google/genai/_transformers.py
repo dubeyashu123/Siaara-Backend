@@ -41,6 +41,28 @@ from . import types
 
 logger = logging.getLogger('google_genai._transformers')
 
+
+def _is_duck_type_of(obj: Any, cls: type[pydantic.BaseModel]) -> bool:
+  """Checks if an object has all of the fields of a Pydantic model.
+
+  This is a duck-typing alternative to `isinstance` to solve dual-import
+  problems. It returns False for dictionaries, which should be handled by
+  `isinstance(obj, dict)`.
+
+  Args:
+    obj: The object to check.
+    cls: The Pydantic model class to duck-type against.
+
+  Returns:
+    True if the object has all the fields defined in the Pydantic model, False
+    otherwise.
+  """
+  if isinstance(obj, dict) or not hasattr(cls, 'model_fields'):
+    return False
+
+  # Check if the object has all of the Pydantic model's defined fields.
+  return all(hasattr(obj, field) for field in cls.model_fields)
+
 if sys.version_info >= (3, 10):
   VersionedUnionType = builtin_types.UnionType
   _UNION_TYPES = (typing.Union, builtin_types.UnionType)
@@ -366,9 +388,12 @@ def t_part(part: Optional[types.PartUnionDict]) -> types.Part:
       raise ValueError('file uri and mime_type are required.')
     return types.Part.from_uri(file_uri=part.uri, mime_type=part.mime_type)
   if isinstance(part, dict):
-    return types.Part.model_validate(part)
-  if isinstance(part, types.Part):
-    return part
+    try:
+      return types.Part.model_validate(part)
+    except pydantic.ValidationError:
+      return types.Part(file_data=types.FileData.model_validate(part))
+  if _is_duck_type_of(part, types.Part):
+    return part  # type: ignore[return-value]
 
   if 'image' in part.__class__.__name__.lower():
     try:
@@ -420,7 +445,7 @@ ContentType = Union[types.Content, types.ContentDict, types.PartUnionDict]
 
 
 def t_content(
-    content: Optional[ContentType],
+    content: Union[ContentType, types.ContentDict, None],
 ) -> types.Content:
   if content is None:
     raise ValueError('content is required.')
@@ -430,12 +455,14 @@ def t_content(
     try:
       return types.Content.model_validate(content)
     except pydantic.ValidationError:
-      possible_part = types.Part.model_validate(content)
+      possible_part = t_part(content)  # type: ignore[arg-type]
       return (
           types.ModelContent(parts=[possible_part])
           if possible_part.function_call
           else types.UserContent(parts=[possible_part])
       )
+  if isinstance(content, types.File):
+    return types.UserContent(parts=[t_part(content)])
   if isinstance(content, types.Part):
     return (
         types.ModelContent(parts=[content])
@@ -495,11 +522,18 @@ def t_contents(
       return True
 
     if isinstance(part, dict):
+      if not part:
+        # Empty dict should be considered as Content, not Part.
+        return False
       try:
         types.Part.model_validate(part)
         return True
       except pydantic.ValidationError:
-        return False
+        try:
+          types.FileData.model_validate(part)
+          return True
+        except pydantic.ValidationError:
+          return False
 
     if 'image' in part.__class__.__name__.lower():
       try:
@@ -553,16 +587,12 @@ def t_contents(
   #   append to result
   # if list, we only accept a list of types.PartUnion
   for content in contents:
-    if (
-        isinstance(content, types.Content)
-        # only allowed inner list is a list of types.PartUnion
-        or isinstance(content, list)
-    ):
+    if _is_duck_type_of(content, types.Content) or isinstance(content, list):
       _append_accumulated_parts_as_content(result, accumulated_parts)
       if isinstance(content, list):
         result.append(types.UserContent(parts=content))  # type: ignore[arg-type]
       else:
-        result.append(content)
+        result.append(content)  # type: ignore[arg-type]
     elif _is_part(content):
       _handle_current_part(result, accumulated_parts, content)
     elif isinstance(content, dict):
