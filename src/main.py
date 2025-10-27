@@ -43,7 +43,7 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 SHEET_ID = os.getenv("GOOGLE_SHEETS_FILE_ID")
 CREDENTIALS_FILE = os.getenv("GOOGLE_SHEETS_CREDENTIALS_FILE")
 
-PLIVO_ANSWER_URL = "https://handbook-ask-normal-fees.trycloudflare.com/plivo_answer"
+PLIVO_ANSWER_URL = "https://compressed-encyclopedia-lessons-cents.trycloudflare.com/plivo_answer"
 
 app = FastAPI(title="AI Sales Call Agent MVP")
 
