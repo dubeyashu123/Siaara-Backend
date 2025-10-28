@@ -43,7 +43,7 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 SHEET_ID = os.getenv("GOOGLE_SHEETS_FILE_ID")
 CREDENTIALS_FILE = os.getenv("GOOGLE_SHEETS_CREDENTIALS_FILE")
 
-PLIVO_ANSWER_URL = "https://compressed-encyclopedia-lessons-cents.trycloudflare.com/plivo_answer"
+PLIVO_ANSWER_URL = "https://siaara.clickites.com/plivo_answer"
 
 app = FastAPI(title="AI Sales Call Agent MVP")
 
@@ -146,7 +146,7 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                 "features": { 
                     "language": "en-IN",
                     "smart_format": True,
-                    "interim_results": True, # लाइव ट्रांसक्रिप्ट के लिए TRUE रखें
+                    "interim_results": True, # Make it True for Live Transript
                     "encoding": "mulaw",
                     "sample_rate": 8000
                 }
@@ -225,7 +225,7 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                     break
 
         except Exception as e:
-            print("💥 deepgram_listener exception:", e)
+            print("deepgram_listener exception:", e)
 
     async def twilio_listener():
         packet_count = 0
@@ -243,7 +243,7 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                     event = data.get("event", "")
 
                     if event == "start":
-                        print("🚀 Twilio start payload:", data)
+                        print("Twilio start payload:", data)
                         await configure_deepgram()
 
                     elif event == "media" and configured:
@@ -261,7 +261,7 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                         print("🛑 Twilio stop event received.")
                         break
         except Exception as e:
-            print("💥 twilio_listener exception:", e)
+            print("twilio_listener exception:", e)
         finally:
             print(f"✅ Twilio listener done. Total packets: {packet_count}")
 
@@ -308,8 +308,7 @@ async def twilio_answer(CallSid: str = Form(None)):
     GREETING = "Hi, I'm Rahul from [Your Company Name]. I'm calling about a service that helps businesses like yours save time on sales calls. How are you today?"
 
     response = VoiceResponse()
-    base_url = PLIVO_ANSWER_URL.split('//')[1].split('/plivo_answer')[0]
-    ws_url = f"wss://{base_url}/media"
+    ws_url = f"wss://siaara.clickites.com/media"
     print(f"Streaming URL set to: {ws_url}")
 
     start = Start()
@@ -318,6 +317,7 @@ async def twilio_answer(CallSid: str = Form(None)):
     response.pause(length=1)
     response.say(GREETING)
     # NEW: Gather to keep the call alive and the stream open
+    action_url = f"https://siaara.clickites.com/end_call"
     response.gather(
         timeout=30, # Keep the stream open for 30 seconds of silence/no input
         num_digits=1, 
@@ -329,7 +329,8 @@ async def twilio_answer(CallSid: str = Form(None)):
 
 
 @app.post("/end_call")
-def end_call_cleanup():
+def end_call_cleanup(CallSid: str = Form(None)):
+    print(f"Call {CallSid} completed or timed out. Hanging up.")
     response = VoiceResponse()
     response.hangup()
     return XMLResponse(content=str(response), media_type="application/xml")
