@@ -14,7 +14,6 @@ import os
 import asyncio
 import uvicorn
 import gspread
-import asyncio
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- Configuration ---
@@ -109,6 +108,7 @@ def initiate_call():
         )
         call_sid = response.sid
         print(f"Call initiated successfully. Call SID: {call_sid}")
+        os.environ["CURRENT_CALL_SID"] = call_sid
         set_lead_status(row_number, "Calling", call_sid)
         return {"status": "calling", "message": f"Call initiated for {lead_name}.", "call_sid": call_sid}
     except Exception as e:
@@ -126,114 +126,85 @@ def mulaw_silence(duration_ms=200, sample_rate=8000):
     num_samples = int(sample_rate * (duration_ms / 1000.0))
     return bytes([0xFF]) * num_samples
 
+
 async def handle_conversation(twilio_ws, sample_rate=8000):
-    print("🧠 handle_conversation started")
+    print("handle_conversation started")
+
+    # Setup Deepgram session
     session = aiohttp.ClientSession()
     dg_ws = await session.ws_connect(
-        DEEPGRAM_URL,
+        f"{DEEPGRAM_URL}?encoding=mulaw&sample_rate=8000&channels=1&model=phonecall&language=en",
         headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
         autoping=True
     )
     print("✅ Connected to Deepgram realtime websocket.")
 
     configured = False
+    ai_response_queue = asyncio.Queue()
 
+    # --- Configure Deepgram ---
     async def configure_deepgram():
         nonlocal configured
         try:
             cfg = {
-                "type": "Configure",
-                "features": { 
-                    "language": "en-IN",
-                    "smart_format": True,
-                    "interim_results": True, # Make it True for Live Transript
-                    "encoding": "mulaw",
-                    "sample_rate": 8000
-                }
+                "type": "configure",
+                "encoding": "mulaw",      # ✅ Correct encoding for Twilio audio
+                "sample_rate": 8000,
+                "channels": 1,
+                "model": "phonecall",
+                "language": "en",
+                "interim_results": False,
+                "smart_format": True
             }
             await dg_ws.send_str(json.dumps(cfg))
             configured = True
-            print("🛠 Sent primary Configure to Deepgram.")
+            print("🛠 Sent Deepgram configuration.")
 
-            # 🔸 Prime the stream with 200ms silence
+            # Prime with silence
             silence = mulaw_silence(200, sample_rate)
             await dg_ws.send_bytes(silence)
-            print("🔊 Sent 200ms mu-law silence to Deepgram.")
-
+            print("Sent 200ms mu-law silence to Deepgram.")
         except Exception as e:
-            print("⚠️ Primary Configure failed:", e)
-            # fallback with processors config
-            try:
-                processors_cfg = {
-                    "type": "Configure",
-                    "processors": [
-                        {
-                            "type": "transcription",
-                            "config": {
-                                "language": "en-IN",
-                                "model": "nova-2",
-                                "smart_format": True,
-                                "interim_results": False
-                            }
-                        }
-                    ]
-                }
-                await dg_ws.send_str(json.dumps(processors_cfg))
-                configured = True
-                print("🛠 Sent fallback processors Configure to Deepgram.")
-                # silence again after fallback
-                silence = mulaw_silence(200, sample_rate)
-                await dg_ws.send_bytes(silence)
-                print("🔊 Sent 200ms mu-law silence after fallback.")
-            except Exception as e2:
-                print("🔴 processors Configure also failed:", e2)
+            print("Deepgram configure failed:", e)
 
+    # --- Deepgram Listener ---
     async def deepgram_listener():
         try:
             async for msg in dg_ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    raw = msg.data
-                    # print raw message snippet for debugging
-                    print("📥 Deepgram raw:", raw[:500])
                     try:
-                        data = json.loads(raw)
-                    except Exception as e:
-                        print("⚠️ Could not parse Deepgram JSON:", e, raw)
+                        data = json.loads(msg.data)
+                    except:
                         continue
 
-                    t = data.get("type", "").lower()
-                    if t in ("transcript", "transcripts"):
-                        transcript = data.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
-                        if transcript.strip():
-                            print(f"🗣 Transcript: {transcript}")
-                    elif t == "metadata":
-                        print("ℹ️ Deepgram metadata:", data)
-                    elif t == "error":
-                        print("🔴 Deepgram ERROR event:", data)
+                    event_type = data.get("type", "")
+
+                    # ✅ Handle the newer Deepgram "Results" event format
+                    if event_type in ("Results", "transcript", "transcripts"):
+                        channel = data.get("channel", data.get("metadata", {}))
+                        alt = channel.get("alternatives", [{}])[0]
+                        transcript = alt.get("transcript", "").strip()
+
+                        if transcript:
+                            print(f"🗣 Customer said: {transcript}")
+                            await ai_response_queue.put(transcript)
                     else:
-                        print("📄 Deepgram other event:", data)
-
-                elif msg.type == aiohttp.WSMsgType.BINARY:
-                    print("📦 Deepgram sent binary (len):", len(msg.data))
-
-                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
-                    print("🛑 Deepgram websocket closed.")
-                    break
-
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    print("⚠️ Deepgram websocket error:", msg)
-                    break
-
+                        print(f"🧩 Deepgram event: {event_type}")
         except Exception as e:
             print("deepgram_listener exception:", e)
+        finally:
+            print("✅ Deepgram listener finished.")
 
+
+    # --- Twilio Listener ---
     async def twilio_listener():
         packet_count = 0
         try:
             while True:
                 msg = await twilio_ws.receive()
+
                 if msg["type"] == "websocket.disconnect":
-                    print("📞 Twilio WebSocket disconnected.")
+                    print("Twilio WebSocket disconnected.")
                     break
                 if msg["type"] != "websocket.receive":
                     continue
@@ -243,7 +214,7 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                     event = data.get("event", "")
 
                     if event == "start":
-                        print("Twilio start payload:", data)
+                        print("Twilio start payload received. Deepgram already pre-configured via URL.")
                         await configure_deepgram()
 
                     elif event == "media" and configured:
@@ -255,25 +226,65 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                             if packet_count % 50 == 0:
                                 print(f"🎧 Forwarded {packet_count} audio packets to Deepgram.")
                         except Exception as e:
-                            print("⚠️ Error decoding or sending media:", e)
+                            print("Error sending media to Deepgram:", e)
 
                     elif event == "stop":
-                        print("🛑 Twilio stop event received.")
+                        print("Twilio stop event received.")
                         break
+
         except Exception as e:
             print("twilio_listener exception:", e)
         finally:
             print(f"✅ Twilio listener done. Total packets: {packet_count}")
 
-    listener_tasks = [
+    # --- AI Responder ---
+    async def ai_responder():
+        from twilio.rest import Client as TwilioRestClient
+        twilio_client = TwilioRestClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        while True:
+            user_text = await ai_response_queue.get()
+            if not user_text:
+                continue
+
+            print(f"Queued transcript received by AI: {user_text}")
+            print(f"Gemini thinking about: {user_text}")
+            try:
+                response = gemini_client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=f"The user said: '{user_text}'. Respond naturally..."   
+                )
+                ai_text = getattr(response, "text", "").strip() or "Okay."
+                print(f"Gemini replied: {ai_text}")
+
+                # --- Play AI's response on call ---
+                # You already have Call SID saved in your sheet — or can pass it via context.
+                # For simplicity, let's assume you use a global or env var for last call sid.
+
+                CALL_SID = os.getenv("CURRENT_CALL_SID")  # or store dynamically when you call initiate_call
+
+                if CALL_SID:
+                    from twilio.twiml.voice_response import VoiceResponse
+                    resp = VoiceResponse()
+                    resp.say(ai_text, voice="Polly.Matthew")
+                    twilio_client.calls(CALL_SID).update(twiml=str(resp))
+                    print(f"📞 Sent AI reply to Twilio for call {CALL_SID}")
+                else:
+                    print("⚠️ No CALL_SID available to send reply to Twilio.")
+
+            except Exception as e:
+                print("⚠️ AI responder error:", e)
+
+    # --- Run All Tasks ---
+    tasks = [
         asyncio.create_task(twilio_listener()),
-        asyncio.create_task(deepgram_listener())
+        asyncio.create_task(deepgram_listener()),
+        asyncio.create_task(ai_responder())
     ]
 
-    await asyncio.wait(listener_tasks, return_when=asyncio.FIRST_COMPLETED)
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-    print("🧹 Cleaning up Twilio/Deepgram connections...")
-    for t in listener_tasks:
+    print(" Cleaning up connections...")
+    for t in tasks:
         t.cancel()
 
     try:
@@ -281,13 +292,17 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
         await twilio_ws.close()
         await session.close()
     except Exception as e:
-        print("⚠️ Cleanup exception:", e)
+        print(" Cleanup exception:", e)
 
     print("✅ Conversation handler finished.")
 
 
 @app.websocket("/media")
 async def websocket_endpoint(websocket: WebSocket):
+    call_sid = websocket.query_params.get("call_sid")
+    print(f"🔗 Incoming WebSocket from Twilio for Call SID: {call_sid}")
+    if call_sid:
+        os.environ["CURRENT_CALL_SID"] = call_sid  # Now it’s available for AI responder
     try:
         await websocket.accept()
         print("WebSocket connection established with Twilio.")
@@ -305,27 +320,59 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.api_route("/plivo_answer", methods=["GET", "POST"])
 async def twilio_answer(CallSid: str = Form(None)):
-    GREETING = "Hi, I'm Rahul from [Your Company Name]. I'm calling about a service that helps businesses like yours save time on sales calls. How are you today?"
+    """
+    TwiML logic for outbound call to customer — two-way streaming.
+    """
+    GREETING = (
+        "Hi, I'm Rahul from Siaara. "
+        "We help automate your business calls and save you time. "
+        "Is this a good time to talk?"
+    )
 
-    response = VoiceResponse()
-    ws_url = f"wss://siaara.clickites.com/media"
+    # WebSocket URL
+    ws_url = f"wss://siaara.clickites.com/media?call_sid={CallSid}"
     print(f"Streaming URL set to: {ws_url}")
 
+    # --- Build TwiML for Twilio ---
+    response = VoiceResponse()
+
+    # Start real-time stream
     start = Start()
-    start.stream(url=ws_url, track='both')
+    start.stream(url=ws_url, track="inbound")
     response.append(start)
+
+    # Small pause before speaking
     response.pause(length=1)
-    response.say(GREETING)
-    # NEW: Gather to keep the call alive and the stream open
-    action_url = f"https://siaara.clickites.com/end_call"
-    response.gather(
-        timeout=30, # Keep the stream open for 30 seconds of silence/no input
-        num_digits=1, 
-        action='/end_call' 
-    )
+
+    # Greeting message
+    response.say(GREETING, voice="Polly.Matthew")
+
+    # Keep the stream alive for 60s even if no DTMF input
+    response.pause(length=60)
+
+    # End call cleanup
+    response.hangup()
+
+    # Log + return
     xml_response = str(response)
     print(f"TwiML Sent: {xml_response}")
     return XMLResponse(content=xml_response, media_type="application/xml")
+
+
+
+@app.post("/twiml_reply")
+async def twiml_reply(text: str = Form(...)):
+    """
+    Twilio will fetch this TwiML when we want to play AI's reply.
+    """
+    from twilio.twiml.voice_response import VoiceResponse
+
+    response = VoiceResponse()
+    response.say(text, voice="Polly.Matthew")
+    response.pause(length=1)
+    response.redirect("https://siaara.clickites.com/plivo_answer")  # optional
+    print(f"🎙️ TwiML Reply Sent: {text}")
+    return XMLResponse(content=str(response), media_type="application/xml")
 
 
 @app.post("/end_call")
