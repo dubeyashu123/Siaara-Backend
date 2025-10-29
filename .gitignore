@@ -3,6 +3,7 @@ credentials.json
 creds.json
 *.pem
 venv/
+.env
 
 credentials.json
 creds.json
