@@ -148,7 +148,7 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
         try:
             cfg = {
                 "type": "configure",
-                "encoding": "mulaw",      # ✅ Correct encoding for Twilio audio
+                "encoding": "mulaw",     
                 "sample_rate": 8000,
                 "channels": 1,
                 "model": "phonecall",
@@ -266,8 +266,16 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                     from twilio.twiml.voice_response import VoiceResponse
                     resp = VoiceResponse()
                     resp.say(ai_text, voice="Polly.Matthew")
+
+                    # 👇 Add a short pause to avoid cutting off too fast
+                    resp.pause(length=1)
+
+                    # 👇 Redirect Twilio back to the streaming TwiML endpoint
+                    # so it stays connected for further conversation
+                    resp.redirect("https://siaara.clickites.com/plivo_answer?mode=continue")
+
                     twilio_client.calls(CALL_SID).update(twiml=str(resp))
-                    print(f"📞 Sent AI reply to Twilio for call {CALL_SID}")
+                    print(f"📞 Sent AI reply and redirected back to /plivo_answer for call {CALL_SID}")
                 else:
                     print("⚠️ No CALL_SID available to send reply to Twilio.")
 
@@ -319,43 +327,41 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @app.api_route("/plivo_answer", methods=["GET", "POST"])
-async def twilio_answer(CallSid: str = Form(None)):
+async def twilio_answer(CallSid: str = Form(None), mode: str = "start"):
     """
     TwiML logic for outbound call to customer — two-way streaming.
+    mode='start' → first call (plays greeting)
+    mode='continue' → subsequent redirect (no greeting)
     """
-    GREETING = (
-        "Hi, I'm Rahul from Siaara. "
-        "We help automate your business calls and save you time. "
-        "Is this a good time to talk?"
-    )
-
-    # WebSocket URL
     ws_url = f"wss://siaara.clickites.com/media?call_sid={CallSid}"
-    print(f"Streaming URL set to: {ws_url}")
+    print(f"Streaming URL set to: {ws_url}, mode={mode}")
 
-    # --- Build TwiML for Twilio ---
     response = VoiceResponse()
 
-    # Start real-time stream
+    # Always start real-time stream
     start = Start()
     start.stream(url=ws_url, track="inbound")
     response.append(start)
 
-    # Small pause before speaking
     response.pause(length=1)
 
-    # Greeting message
-    response.say(GREETING, voice="Polly.Matthew")
+    if mode == "start":
+        # ✅ Only play the greeting on the first call
+        GREETING = (
+            "Hi, I'm Rahul from Siaara. "
+            "We help automate your business calls and save you time. "
+            "Is this a good time to talk?"
+        )
+        response.say(GREETING, voice="Polly.Matthew")
+    else:
+        # 🔁 On redirects, do nothing — just keep streaming
+        response.say("", voice="Polly.Matthew")
 
-    # Keep the stream alive for 60s even if no DTMF input
-    response.pause(length=60)
+    # Keep alive for more conversation
+    response.pause(length=900)
 
-    # End call cleanup
-    response.hangup()
-
-    # Log + return
     xml_response = str(response)
-    print(f"TwiML Sent: {xml_response}")
+    print(f"TwiML Sent (mode={mode}): {xml_response}")
     return XMLResponse(content=xml_response, media_type="application/xml")
 
 
