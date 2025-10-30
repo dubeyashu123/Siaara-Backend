@@ -179,7 +179,6 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
 
                     event_type = data.get("type", "")
 
-                    # ✅ Handle the newer Deepgram "Results" event format
                     if event_type in ("Results", "transcript", "transcripts"):
                         channel = data.get("channel", data.get("metadata", {}))
                         alt = channel.get("alternatives", [{}])[0]
@@ -315,7 +314,7 @@ async def websocket_endpoint(websocket: WebSocket):
     call_sid = websocket.query_params.get("call_sid")
     print(f"🔗 Incoming WebSocket from Twilio for Call SID: {call_sid}")
     if call_sid:
-        os.environ["CURRENT_CALL_SID"] = call_sid  # Now it’s available for AI responder
+        os.environ["CURRENT_CALL_SID"] = call_sid
     try:
         await websocket.accept()
         print("WebSocket connection established with Twilio.")
