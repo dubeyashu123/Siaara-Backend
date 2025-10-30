@@ -257,7 +257,6 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                     "If the user sounds uninterested or confused, politely acknowledge and ask one simple follow-up question."
                     f"\nCustomer said: '{user_text}'"
                 )
-
                 response = gemini_client.models.generate_content(
                     model=GEMINI_MODEL,
                     contents=prompt
@@ -276,11 +275,8 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
                     resp = VoiceResponse()
                     resp.say(ai_text, voice="Polly.Matthew")
 
-                    # 👇 Add a short pause to avoid cutting off too fast
                     resp.pause(length=1)
 
-                    # 👇 Redirect Twilio back to the streaming TwiML endpoint
-                    # so it stays connected for further conversation
                     resp.redirect("https://siaara.clickites.com/plivo_answer?mode=continue")
 
                     twilio_client.calls(CALL_SID).update(twiml=str(resp))
@@ -355,7 +351,6 @@ async def twilio_answer(CallSid: str = Form(None), mode: str = "start"):
     response.pause(length=1)
 
     if mode == "start":
-        # ✅ Only play the greeting on the first call
         GREETING = (
             "Hi, I'm Rahul from Siaara. "
             "We help automate your business calls and save you time. "
@@ -363,7 +358,6 @@ async def twilio_answer(CallSid: str = Form(None), mode: str = "start"):
         )
         response.say(GREETING, voice="Polly.Matthew")
     else:
-        # 🔁 On redirects, do nothing — just keep streaming
         response.say("", voice="Polly.Matthew")
 
     # Keep alive for more conversation
@@ -372,8 +366,6 @@ async def twilio_answer(CallSid: str = Form(None), mode: str = "start"):
     xml_response = str(response)
     print(f"TwiML Sent (mode={mode}): {xml_response}")
     return XMLResponse(content=xml_response, media_type="application/xml")
-
-
 
 @app.post("/twiml_reply")
 async def twiml_reply(text: str = Form(...)):
