@@ -249,9 +249,18 @@ async def handle_conversation(twilio_ws, sample_rate=8000):
             print(f"Queued transcript received by AI: {user_text}")
             print(f"Gemini thinking about: {user_text}")
             try:
+                prompt = (
+                    "You are an AI voice agent named Rahul from Siaara calling a potential customer. "
+                    "Respond in a natural, conversational tone, as if speaking on the phone. "
+                    "Keep your reply short (one or two sentences). "
+                    "Do not explain, summarize, or give multiple options — just continue the conversation smoothly. "
+                    "If the user sounds uninterested or confused, politely acknowledge and ask one simple follow-up question."
+                    f"\nCustomer said: '{user_text}'"
+                )
+
                 response = gemini_client.models.generate_content(
                     model=GEMINI_MODEL,
-                    contents=f"The user said: '{user_text}'. Respond naturally..."   
+                    contents=prompt
                 )
                 ai_text = getattr(response, "text", "").strip() or "Okay."
                 print(f"Gemini replied: {ai_text}")
